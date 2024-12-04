@@ -1,0 +1,45 @@
+name: MySQL Binlog Listener
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # Run at the top of every hour
+  workflow_dispatch: # Allows manual triggering for testing
+
+jobs:
+  monitor-webhooks:
+    runs-on: ubuntu-latest
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}  # Ensures that only one workflow for the same branch is running at a time
+      cancel-in-progress: true  # Cancels any currently running job of the same group if a new one is triggered
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: "20"  # Use Node.js 20.x
+
+      - name: Decode SSL Certificate
+        # Decodes the Base64 certificate stored as a secret into a .pem file
+        run: |
+          echo "${{ secrets.SSL_CERT_BASE64 }}" | base64 -d > DigiCertGlobalRootCA.crt.pem
+
+      - name: Install Dependencies
+        run: |
+          npm install --verbose  # Adds verbosity to see any issues during dependency installation
+
+      - name: Run MySQL Binlog Listener
+        run: |
+          node cronRunner.js || { echo 'Error running cronRunner.js'; exit 1; }  # Ensures job fails clearly if there's an error
+        env:
+          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
+          AZURE_SEARCH_ENDPOINT: ${{ secrets.AZURE_SEARCH_ENDPOINT }}
+          AZURE_SEARCH_API_KEY: ${{ secrets.AZURE_SEARCH_API_KEY }}
+
+      - name: Clean Up
+        run: |
+          echo "Cleaning up after the job..."
+          # Any clean-up steps after the job completes can be added here.
