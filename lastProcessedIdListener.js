@@ -2,6 +2,7 @@ const mysql = require("mysql2/promise");
 const client = require("./elasticsearch");
 const fs = require("fs"); // To read the SSL certificate file
 const axios = require("axios");
+const processFieldContent = require("./mysqlwebhookServices.js").processFieldContent;
 require("dotenv").config();
 
 exports.lastProcessedIdListener = async () => {
@@ -36,6 +37,8 @@ exports.lastProcessedIdListener = async () => {
                     password,
                     database,
                     table_name,
+                    field_name,
+                    field_type,
                     category,
                     coid,
                     lastProcessedId,
@@ -58,7 +61,7 @@ exports.lastProcessedIdListener = async () => {
 
                 // Step 4: Fetch new rows from the table based on the last processed ID
                 const [rows] = await connection.query(
-                    `SELECT * FROM ${table_name} WHERE id > ?`,
+                    `SELECT id, ${field_name} AS field_value FROM ${table_name} WHERE id > ? ORDER BY id ASC`,
                     [lastProcessedId || 0]
                 );
 
@@ -67,47 +70,56 @@ exports.lastProcessedIdListener = async () => {
                 if (rows.length > 0) {
                     console.log(`New rows detected:`, rows);
 
-                    // Map rows to the required format
-                    const data = rows.map((row) => ({
-                        id: row.id.toString(),
-                        title: row.title,
-                        content: row.content,
-                        description: row.description,
-                        image: row.image,
-                        category: category,
-                    }));
+                    const documents = [];
 
-                    const indexName = `tenant_${coid.toLowerCase()}`;
+                    for (const row of rows) {
+                        try {
+                            const content = await processFieldContent(row.field_value, field_type);
 
-                    const payload = {
-                        value: data.map((doc) => ({
-                            "@search.action": "mergeOrUpload",
-                            id: doc.id,
-                            title: doc.title,
-                            content: doc.content,
-                            description: doc.description,
-                            image: doc.image,
-                            category: doc.category,
-                        })),
-                    };
-
-                    // Push data to Azure Search (uncomment if necessary)
-                    const esResponse = await axios.post(
-                        `${process.env.AZURE_SEARCH_ENDPOINT}/indexes/${indexName}/docs/index?api-version=2021-04-30-Preview`,
-                        payload,
-                        {
-                            headers: {
-                                "Content-Type": "application/json",
-                                "api-key": process.env.AZURE_SEARCH_API_KEY,
-                            },
+                            if (content) {
+                                // Prepare the document structure
+                                documents.push({
+                                    "@search.action": "mergeOrUpload",
+                                    id: row.id.toString(),
+                                    title: `Default Title for Row ${row.id}`, // Default or provided
+                                    content, // Processed content
+                                    description: `Default Description for Row ${row.id}`, // Default or provided
+                                    image: null, // Optional
+                                    category: category, // Default or provided
+                                });
+                            }
+                        } catch (error) {
+                            console.error(`Error processing content for row ID ${row.RowID}:`, error.message);
                         }
-                    );
+                    }
 
-                    console.log("ES Response Data => ", esResponse.data);
+                    if (documents.length > 0) {
+                        const indexName = `tenant_${coid.toLowerCase()}`;
 
-                    console.log(
-                        `Documents pushed successfully to Azure Search in index: ${indexName}`
-                    );
+                        const payload = {
+                            value: documents,
+                        };
+
+                        // Push data to Azure Search (uncomment if necessary)
+                        const esResponse = await axios.post(
+                            `${process.env.AZURE_SEARCH_ENDPOINT}/indexes/${indexName}/docs/index?api-version=2021-04-30-Preview`,
+                            payload,
+                            {
+                                headers: {
+                                    "Content-Type": "application/json",
+                                    "api-key": process.env.AZURE_SEARCH_API_KEY,
+                                },
+                            }
+                        );
+
+                        console.log("ES Response Data => ", esResponse.data);
+
+                        console.log(
+                            `Documents pushed successfully to Azure Search in index: ${indexName}`
+                        );
+                    } else {
+                        console.log("No documents to index.");
+                    }
 
                     // Step 5: Update the last processed ID in ElasticSearch
                     const newLastProcessedId = rows[rows.length - 1].id;
